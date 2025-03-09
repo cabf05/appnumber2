@@ -1,13 +1,10 @@
 import streamlit as st
 from supabase import create_client, Client
-import random
-import time
-import io
 import uuid
-from PIL import Image, ImageDraw, ImageFont
 import pandas as pd
 from datetime import datetime
 import json
+import time
 
 # --- Configuração Inicial ---
 st.set_page_config(
@@ -20,7 +17,6 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main-header {text-align: center; margin-bottom: 30px;}
-    .number-display {font-size: 72px; text-align: center; margin: 30px 0;}
     .success-msg {background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px;}
     .error-msg {background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;}
     .form-box {border: 1px solid #ccc; padding: 20px; border-radius: 10px; margin: 10px 0;}
@@ -44,48 +40,56 @@ def inicializar_banco_dados(supabase):
     """Cria todas as tabelas necessárias se não existirem"""
     try:
         # Tabela de reuniões
-        supabase.rpc("execute_sql", {"query": """
-            CREATE TABLE IF NOT EXISTS reunioes (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                nome TEXT NOT NULL,
-                tabela_nome TEXT NOT NULL UNIQUE,
-                max_numeros INT NOT NULL,
-                criado_em TIMESTAMPTZ DEFAULT NOW()
-            );
-        """).execute()
+        supabase.rpc("execute_sql", params={
+            "query": """
+                CREATE TABLE IF NOT EXISTS reunioes (
+                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    nome TEXT NOT NULL,
+                    tabela_nome TEXT NOT NULL UNIQUE,
+                    max_numeros INT NOT NULL,
+                    criado_em TIMESTAMPTZ DEFAULT NOW()
+                );
+            """
+        }).execute()
 
         # Tabelas de formulários
-        supabase.rpc("execute_sql", {"query": """
-            CREATE TABLE IF NOT EXISTS formularios (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                reuniao_id UUID REFERENCES reunioes(id),
-                titulo TEXT NOT NULL,
-                descricao TEXT,
-                criado_em TIMESTAMPTZ DEFAULT NOW()
-            );
-        """).execute()
+        supabase.rpc("execute_sql", params={
+            "query": """
+                CREATE TABLE IF NOT EXISTS formularios (
+                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    reuniao_id UUID REFERENCES reunioes(id),
+                    titulo TEXT NOT NULL,
+                    descricao TEXT,
+                    criado_em TIMESTAMPTZ DEFAULT NOW()
+                );
+            """
+        }).execute()
 
-        supabase.rpc("execute_sql", {"query": """
-            CREATE TABLE IF NOT EXISTS perguntas (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                formulario_id UUID REFERENCES formularios(id) ON DELETE CASCADE,
-                texto TEXT NOT NULL,
-                tipo TEXT NOT NULL,
-                opcoes JSONB,
-                ordem INT NOT NULL,
-                obrigatoria BOOLEAN DEFAULT FALSE
-            );
-        """).execute()
+        supabase.rpc("execute_sql", params={
+            "query": """
+                CREATE TABLE IF NOT EXISTS perguntas (
+                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    formulario_id UUID REFERENCES formularios(id) ON DELETE CASCADE,
+                    texto TEXT NOT NULL,
+                    tipo TEXT NOT NULL,
+                    opcoes JSONB,
+                    ordem INT NOT NULL,
+                    obrigatoria BOOLEAN DEFAULT FALSE
+                );
+            """
+        }).execute()
 
-        supabase.rpc("execute_sql", {"query": """
-            CREATE TABLE IF NOT EXISTS respostas (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                formulario_id UUID REFERENCES formularios(id) ON DELETE CASCADE,
-                usuario_id TEXT NOT NULL,
-                respostas JSONB NOT NULL,
-                submetido_em TIMESTAMPTZ DEFAULT NOW()
-            );
-        """).execute()
+        supabase.rpc("execute_sql", params={
+            "query": """
+                CREATE TABLE IF NOT EXISTS respostas (
+                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    formulario_id UUID REFERENCES formularios(id) ON DELETE CASCADE,
+                    usuario_id TEXT NOT NULL,
+                    respostas JSONB NOT NULL,
+                    submetido_em TIMESTAMPTZ DEFAULT NOW()
+                );
+            """
+        }).execute()
 
         return True
     except Exception as e:
@@ -108,7 +112,6 @@ form_id = query_params.get("formulario", None)
 # --- Modo Participante (Formulário) ---
 if form_id and supabase:
     try:
-        # Carregar formulário
         formulario = supabase.table("formularios").select("*").eq("id", form_id).single().execute().data
         perguntas = supabase.table("perguntas").select("*").eq("formulario_id", form_id).order("ordem").execute().data
 
@@ -116,13 +119,11 @@ if form_id and supabase:
         if formulario.get("descricao"):
             st.markdown(f"*{formulario['descricao']}*")
 
-        # Verificar resposta existente
         resposta_existente = supabase.table("respostas").select("*").eq("formulario_id", form_id).eq("usuario_id", st.session_state["user_id"]).execute().data
         if resposta_existente:
             st.warning("Você já respondeu este formulário!")
             st.stop()
 
-        # Coletar respostas
         respostas = {}
         with st.form(key="formulario_participante"):
             for pergunta in perguntas:
@@ -165,11 +166,10 @@ else:
     st.sidebar.title("Painel do Organizador")
     pagina = st.sidebar.radio("Navegação", ["Reuniões", "Formulários", "Respostas"])
 
-    # Página: Gerenciar Reuniões
+    # Página: Reuniões
     if pagina == "Reuniões":
         st.header("📅 Gerenciar Reuniões")
         
-        # Criar nova reunião
         with st.expander("➕ Nova Reunião", expanded=True):
             with st.form(key="nova_reuniao"):
                 nome_reuniao = st.text_input("Nome da Reunião")
@@ -179,25 +179,24 @@ else:
                     try:
                         tabela_nome = f"reuniao_{uuid.uuid4().hex[:8]}"
                         
-                        # Criar tabela de números
-                        supabase.rpc("execute_sql", {"query": f"""
-                            CREATE TABLE {tabela_nome} (
-                                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                                numero INT NOT NULL UNIQUE,
-                                atribuido BOOLEAN DEFAULT FALSE,
-                                usuario_id TEXT,
-                                atribuido_em TIMESTAMPTZ
-                            );
-                        """).execute()
+                        supabase.rpc("execute_sql", params={
+                            "query": f"""
+                                CREATE TABLE {tabela_nome} (
+                                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                                    numero INT NOT NULL UNIQUE,
+                                    atribuido BOOLEAN DEFAULT FALSE,
+                                    usuario_id TEXT,
+                                    atribuido_em TIMESTAMPTZ
+                                );
+                            """
+                        }).execute()
                         
-                        # Inserir metadados
                         reuniao = supabase.table("reunioes").insert({
                             "nome": nome_reuniao,
                             "tabela_nome": tabela_nome,
                             "max_numeros": max_numeros
                         }).execute().data[0]
                         
-                        # Popular números
                         numeros = [{"numero": n} for n in range(1, max_numeros+1)]
                         for i in range(0, len(numeros), 1000):
                             supabase.table(tabela_nome).insert(numeros[i:i+1000]).execute()
@@ -206,7 +205,6 @@ else:
                     except Exception as e:
                         st.error(f"Erro ao criar reunião: {str(e)}")
 
-        # Listar reuniões existentes
         st.subheader("Reuniões Ativas")
         if supabase:
             reunioes = supabase.table("reunioes").select("*").execute().data
@@ -228,7 +226,6 @@ else:
         reunioes = supabase.table("reunioes").select("*").execute().data
         reuniao_selecionada = st.selectbox("Selecione a Reunião", reunioes, format_func=lambda r: r["nome"])
         
-        # Criar novo formulário
         with st.expander("➕ Novo Formulário", expanded=True):
             with st.form(key="novo_formulario"):
                 titulo = st.text_input("Título do Formulário")
@@ -255,14 +252,12 @@ else:
 
                 if st.form_submit_button("Criar Formulário"):
                     try:
-                        # Criar formulário
                         novo_form = supabase.table("formularios").insert({
                             "reuniao_id": reuniao_selecionada["id"],
                             "titulo": titulo,
                             "descricao": descricao
                         }).execute().data[0]
                         
-                        # Adicionar perguntas
                         for i, pergunta in enumerate(perguntas):
                             supabase.table("perguntas").insert({
                                 "formulario_id": novo_form["id"],
@@ -273,7 +268,6 @@ else:
                                 "obrigatoria": pergunta["obrigatoria"]
                             }).execute()
                         
-                        # Gerar link
                         link_form = f"https://mynumber.streamlit.app/?formulario={novo_form['id']}&user_id={st.session_state['user_id']}"
                         st.success(f"Formulário criado! [Link do Formulário]({link_form})")
                     except Exception as e:
@@ -291,7 +285,6 @@ else:
             perguntas = supabase.table("perguntas").select("*").eq("formulario_id", form_selecionado["id"]).order("ordem").execute().data
             
             if respostas:
-                # Exportar CSV
                 df = pd.DataFrame([{
                     **{"Usuário": r["usuario_id"], "Data": r["submetido_em"]},
                     **{p["texto"]: json.loads(r["respostas"]).get(p["id"], "") 
@@ -305,7 +298,6 @@ else:
                     "text/csv"
                 )
                 
-                # Visualizar respostas
                 for resposta in respostas:
                     with st.expander(f"Resposta de {resposta['usuario_id']}"):
                         respostas_data = json.loads(resposta["respostas"])

@@ -13,7 +13,7 @@ from supabase import create_client, Client
 # --- Inicializando o Cookie Manager ---
 # Certifique-se de instalar a biblioteca: pip install streamlit-cookies-manager
 # Substitua "SUA_CHAVE_SECRETA_AQUI" por uma chave secreta de sua preferência.
-cookies = EncryptedCookieManager(key="cvPE_PGmCLhwLDcd5vODQvZ6z8KxI2Fw2m2gF_rvQkI")
+cookies = EncryptedCookieManager(key=cvPE_PGmCLhwLDcd5vODQvZ6z8KxI2Fw2m2gF_rvQkI)
 if not cookies.ready():
     st.stop()
 

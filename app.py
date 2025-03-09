@@ -7,7 +7,6 @@ import uuid
 from PIL import Image, ImageDraw, ImageFont
 import pandas as pd
 from datetime import datetime
-import os
 import json
 
 # --- Configuração Inicial ---
@@ -31,63 +30,60 @@ st.markdown("""
 # --- Funções Principais ---
 
 def get_supabase_client() -> Client:
-    """Cria conexão com o Supabase"""
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_KEY")
-    if not supabase_url or not supabase_key:
-        st.error("Variáveis de ambiente do Supabase não configuradas!")
-        return None
+    """Cria conexão com o Supabase usando Secrets"""
     try:
-        return create_client(supabase_url, supabase_key)
+        return create_client(
+            st.secrets["SUPABASE_URL"],
+            st.secrets["SUPABASE_KEY"]
+        )
     except Exception as e:
-        st.error(f"Erro de conexão: {str(e)}")
+        st.error(f"Erro de conexão com o Supabase: {str(e)}")
         return None
 
-def criar_tabelas_necessarias(supabase):
+def inicializar_banco_dados(supabase):
     """Cria todas as tabelas necessárias se não existirem"""
     try:
-        # Criar tabela de reuniões
+        # Tabela de reuniões
         supabase.rpc("execute_sql", {"query": """
-            CREATE TABLE IF NOT EXISTS meetings_metadata (
+            CREATE TABLE IF NOT EXISTS reunioes (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                table_name TEXT NOT NULL UNIQUE,
-                meeting_name TEXT NOT NULL,
-                max_number INT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                nome TEXT NOT NULL,
+                tabela_nome TEXT NOT NULL UNIQUE,
+                max_numeros INT NOT NULL,
+                criado_em TIMESTAMPTZ DEFAULT NOW()
             );
         """).execute()
 
-        # Criar tabelas de formulários
+        # Tabelas de formulários
         supabase.rpc("execute_sql", {"query": """
-            CREATE TABLE IF NOT EXISTS forms_metadata (
+            CREATE TABLE IF NOT EXISTS formularios (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                meeting_id UUID REFERENCES meetings_metadata(id),
-                title TEXT NOT NULL,
-                description TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                reuniao_id UUID REFERENCES reunioes(id),
+                titulo TEXT NOT NULL,
+                descricao TEXT,
+                criado_em TIMESTAMPTZ DEFAULT NOW()
             );
         """).execute()
 
         supabase.rpc("execute_sql", {"query": """
-            CREATE TABLE IF NOT EXISTS questions (
+            CREATE TABLE IF NOT EXISTS perguntas (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                form_id UUID REFERENCES forms_metadata(id) ON DELETE CASCADE,
-                question_text TEXT NOT NULL,
-                question_type TEXT NOT NULL,
-                options JSONB,
+                formulario_id UUID REFERENCES formularios(id) ON DELETE CASCADE,
+                texto TEXT NOT NULL,
+                tipo TEXT NOT NULL,
+                opcoes JSONB,
                 ordem INT NOT NULL,
-                required BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                obrigatoria BOOLEAN DEFAULT FALSE
             );
         """).execute()
 
         supabase.rpc("execute_sql", {"query": """
-            CREATE TABLE IF NOT EXISTS responses (
+            CREATE TABLE IF NOT EXISTS respostas (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                form_id UUID REFERENCES forms_metadata(id) ON DELETE CASCADE,
-                user_id TEXT NOT NULL,
-                answers JSONB NOT NULL,
-                submitted_at TIMESTAMPTZ DEFAULT NOW()
+                formulario_id UUID REFERENCES formularios(id) ON DELETE CASCADE,
+                usuario_id TEXT NOT NULL,
+                respostas JSONB NOT NULL,
+                submetido_em TIMESTAMPTZ DEFAULT NOW()
             );
         """).execute()
 
@@ -96,232 +92,226 @@ def criar_tabelas_necessarias(supabase):
         st.error(f"Erro ao criar tabelas: {str(e)}")
         return False
 
-def criar_tabela_reuniao(supabase, nome_reuniao, max_numero):
-    """Cria uma nova tabela para uma reunião"""
-    try:
-        tabela_nome = f"reuniao_{uuid.uuid4().hex[:8]}"
-        
-        # Criar entrada na metadata
-        reuniao_data = supabase.table("meetings_metadata").insert({
-            "table_name": tabela_nome,
-            "meeting_name": nome_reuniao,
-            "max_number": max_numero
-        }).execute().data[0]
-
-        # Criar tabela de números
-        supabase.rpc("execute_sql", {"query": f"""
-            CREATE TABLE public.{tabela_nome} (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                number INT NOT NULL UNIQUE,
-                assigned BOOLEAN DEFAULT FALSE,
-                user_id TEXT,
-                assigned_at TIMESTAMPTZ
-            );
-        """).execute()
-
-        # Inserir números
-        numeros = [{"number": n} for n in range(1, max_numero+1)]
-        for i in range(0, len(numeros), 1000):
-            supabase.table(tabela_nome).insert(numeros[i:i+1000]).execute()
-
-        return reuniao_data
-    except Exception as e:
-        st.error(f"Erro ao criar reunião: {str(e)}")
-        return None
-
-def criar_formulario(supabase, reuniao_id, titulo, descricao, perguntas):
-    """Cria um novo formulário com perguntas"""
-    try:
-        # Criar metadata do formulário
-        form_data = supabase.table("forms_metadata").insert({
-            "meeting_id": reuniao_id,
-            "title": titulo,
-            "description": descricao
-        }).execute().data[0]
-
-        # Adicionar perguntas
-        for i, pergunta in enumerate(perguntas):
-            supabase.table("questions").insert({
-                "form_id": form_data["id"],
-                "question_text": pergunta["texto"],
-                "question_type": pergunta["tipo"],
-                "options": json.dumps(pergunta.get("opcoes", [])),
-                "ordem": i+1,
-                "required": pergunta.get("obrigatoria", False)
-            }).execute()
-
-        return form_data
-    except Exception as e:
-        st.error(f"Erro ao criar formulário: {str(e)}")
-        return None
-
 # --- Estado da Sessão ---
 if "user_id" not in st.session_state:
     st.session_state["user_id"] = str(uuid.uuid4())
 
-# --- Configuração Inicial do Banco de Dados ---
+# --- Inicialização do Supabase ---
 supabase = get_supabase_client()
 if supabase:
-    criar_tabelas_necessarias(supabase)
+    inicializar_banco_dados(supabase)
 
 # --- Manipulação de Parâmetros da URL ---
 query_params = st.query_params
-modo = query_params.get("modo", "master")
-form_id = query_params.get("form_id", None)
+form_id = query_params.get("formulario", None)
 
 # --- Modo Participante (Formulário) ---
 if form_id and supabase:
     try:
-        # Carregar dados do formulário
-        form = supabase.table("forms_metadata").select("*").eq("id", form_id).single().execute().data
-        perguntas = supabase.table("questions").select("*").eq("form_id", form_id).order("ordem").execute().data
+        # Carregar formulário
+        formulario = supabase.table("formularios").select("*").eq("id", form_id).single().execute().data
+        perguntas = supabase.table("perguntas").select("*").eq("formulario_id", form_id).order("ordem").execute().data
 
-        st.title(form["title"])
-        st.write(form.get("description", ""))
+        st.title(formulario["titulo"])
+        if formulario.get("descricao"):
+            st.markdown(f"*{formulario['descricao']}*")
 
         # Verificar resposta existente
-        resposta_existente = supabase.table("responses").select("*").eq("form_id", form_id).eq("user_id", st.session_state["user_id"]).execute().data
+        resposta_existente = supabase.table("respostas").select("*").eq("formulario_id", form_id).eq("usuario_id", st.session_state["user_id"]).execute().data
         if resposta_existente:
             st.warning("Você já respondeu este formulário!")
             st.stop()
 
         # Coletar respostas
         respostas = {}
-        with st.form("formulario"):
+        with st.form(key="formulario_participante"):
             for pergunta in perguntas:
-                label = f"{pergunta['question_text']}{' *' if pergunta['required'] else ''}"
+                resposta = None
+                label = f"{pergunta['texto']}{' *' if pergunta['obrigatoria'] else ''}"
                 
-                if pergunta["question_type"] == "texto":
-                    resposta = st.text_input(label, key=pergunta["id"])
-                elif pergunta["question_type"] == "multipla_escolha":
-                    opcoes = json.loads(pergunta["options"])
-                    resposta = st.multiselect(label, opcoes, key=pergunta["id"])
-                elif pergunta["question_type"] == "escolha_unica":
-                    opcoes = json.loads(pergunta["options"])
-                    resposta = st.radio(label, opcoes, key=pergunta["id"])
-                elif pergunta["question_type"] == "escala":
-                    resposta = st.slider(label, 1, 5, key=pergunta["id"])
+                if pergunta["tipo"] == "texto":
+                    resposta = st.text_input(label)
+                elif pergunta["tipo"] == "multipla_escolha":
+                    opcoes = json.loads(pergunta["opcoes"])
+                    resposta = st.multiselect(label, opcoes)
+                elif pergunta["tipo"] == "escolha_unica":
+                    opcoes = json.loads(pergunta["opcoes"])
+                    resposta = st.radio(label, opcoes)
+                elif pergunta["tipo"] == "escala":
+                    resposta = st.slider(label, 1, 5)
+                
+                if pergunta["obrigatoria"] and not resposta:
+                    st.error("Campo obrigatório!")
+                    st.stop()
                 
                 respostas[pergunta["id"]] = resposta
 
             if st.form_submit_button("Enviar Respostas"):
-                # Validar campos obrigatórios
-                campos_validos = True
-                for pergunta in perguntas:
-                    if pergunta["required"] and not respostas.get(pergunta["id"]):
-                        campos_validos = False
-                        st.error(f"Campo obrigatório: {pergunta['question_text']}")
-                
-                if campos_validos:
-                    supabase.table("responses").insert({
-                        "form_id": form_id,
-                        "user_id": st.session_state["user_id"],
-                        "answers": json.dumps(respostas)
-                    }).execute()
-                    st.success("Respostas enviadas com sucesso!")
-                    time.sleep(2)
-                    st.rerun()
+                supabase.table("respostas").insert({
+                    "formulario_id": form_id,
+                    "usuario_id": st.session_state["user_id"],
+                    "respostas": json.dumps(respostas)
+                }).execute()
+                st.success("Respostas enviadas com sucesso!")
+                time.sleep(2)
+                st.rerun()
 
     except Exception as e:
         st.error(f"Erro ao carregar formulário: {str(e)}")
     st.stop()
 
-# --- Modo Mestre ---
+# --- Modo Organizador ---
 else:
-    st.sidebar.title("Menu do Organizador")
-    pagina = st.sidebar.radio("Navegação", [
-        "Gerenciar Reuniões", 
-        "Criar Formulário", 
-        "Visualizar Respostas"
-    ])
+    st.sidebar.title("Painel do Organizador")
+    pagina = st.sidebar.radio("Navegação", ["Reuniões", "Formulários", "Respostas"])
 
     # Página: Gerenciar Reuniões
-    if pagina == "Gerenciar Reuniões":
+    if pagina == "Reuniões":
         st.header("📅 Gerenciar Reuniões")
         
+        # Criar nova reunião
         with st.expander("➕ Nova Reunião", expanded=True):
-            with st.form("nova_reuniao"):
-                nome = st.text_input("Nome da Reunião")
-                max_num = st.number_input("Número Máximo de Participantes", 10, 10000, 100)
+            with st.form(key="nova_reuniao"):
+                nome_reuniao = st.text_input("Nome da Reunião")
+                max_numeros = st.number_input("Número Máximo de Participantes", 10, 10000, 100)
                 
-                if st.form_submit_button("Criar Reunião"):
-                    if supabase and nome:
-                        reuniao = criar_tabela_reuniao(supabase, nome, max_num)
-                        if reuniao:
-                            st.success(f"Reunião '{nome}' criada com sucesso! Tabela: {reuniao['table_name']}")
+                if st.form_submit_button("Criar"):
+                    try:
+                        tabela_nome = f"reuniao_{uuid.uuid4().hex[:8]}"
+                        
+                        # Criar tabela de números
+                        supabase.rpc("execute_sql", {"query": f"""
+                            CREATE TABLE {tabela_nome} (
+                                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                                numero INT NOT NULL UNIQUE,
+                                atribuido BOOLEAN DEFAULT FALSE,
+                                usuario_id TEXT,
+                                atribuido_em TIMESTAMPTZ
+                            );
+                        """).execute()
+                        
+                        # Inserir metadados
+                        reuniao = supabase.table("reunioes").insert({
+                            "nome": nome_reuniao,
+                            "tabela_nome": tabela_nome,
+                            "max_numeros": max_numeros
+                        }).execute().data[0]
+                        
+                        # Popular números
+                        numeros = [{"numero": n} for n in range(1, max_numeros+1)]
+                        for i in range(0, len(numeros), 1000):
+                            supabase.table(tabela_nome).insert(numeros[i:i+1000]).execute()
+                        
+                        st.success(f"Reunião '{nome_reuniao}' criada! Tabela: {tabela_nome}")
+                    except Exception as e:
+                        st.error(f"Erro ao criar reunião: {str(e)}")
 
-        st.subheader("Reuniões Existentes")
+        # Listar reuniões existentes
+        st.subheader("Reuniões Ativas")
         if supabase:
-            reunioes = supabase.table("meetings_metadata").select("*").execute().data
+            reunioes = supabase.table("reunioes").select("*").execute().data
             for reuniao in reunioes:
                 col1, col2 = st.columns([4,1])
-                col1.write(f"**{reuniao['meeting_name']}** (Números: 1-{reuniao['max_number']})")
-                col2.button("Excluir", key=f"del_{reuniao['id']}", on_click=lambda: supabase.table("meetings_metadata").delete().eq("id", reuniao["id"]).execute())
+                col1.markdown(f"""
+                    **{reuniao['nome']}**  
+                    *Números: 1-{reuniao['max_numeros']}*  
+                    `Tabela: {reuniao['tabela_nome']}`
+                """)
+                if col2.button("Excluir", key=f"del_{reuniao['id']}"):
+                    supabase.table("reunioes").delete().eq("id", reuniao["id"]).execute()
+                    st.rerun()
 
-    # Página: Criar Formulário
-    elif pagina == "Criar Formulário" and supabase:
-        st.header("📝 Criar Novo Formulário")
+    # Página: Formulários
+    elif pagina == "Formulários" and supabase:
+        st.header("📝 Gerenciar Formulários")
         
-        reunioes = supabase.table("meetings_metadata").select("*").execute().data
-        reuniao_selecionada = st.selectbox("Selecione a Reunião", reunioes, format_func=lambda r: r["meeting_name"])
+        reunioes = supabase.table("reunioes").select("*").execute().data
+        reuniao_selecionada = st.selectbox("Selecione a Reunião", reunioes, format_func=lambda r: r["nome"])
         
-        with st.form("novo_formulario"):
-            titulo = st.text_input("Título do Formulário")
-            descricao = st.text_area("Descrição")
-            
-            st.subheader("Perguntas")
-            perguntas = []
-            for i in range(3):
-                with st.expander(f"Pergunta {i+1}", expanded=i<2):
-                    tipo = st.selectbox("Tipo", ["texto", "multipla_escolha", "escolha_unica", "escala"], key=f"tipo_{i}")
-                    texto = st.text_input("Texto da Pergunta", key=f"texto_{i}")
-                    obrigatoria = st.checkbox("Obrigatória", key=f"obrigatoria_{i}")
-                    opcoes = []
-                    
-                    if tipo in ["multipla_escolha", "escolha_unica"]:
-                        opcoes = st.text_area("Opções (uma por linha)", key=f"opcoes_{i}").split("\n")
-                    
-                    perguntas.append({
-                        "tipo": tipo,
-                        "texto": texto,
-                        "obrigatoria": obrigatoria,
-                        "opcoes": opcoes
-                    })
+        # Criar novo formulário
+        with st.expander("➕ Novo Formulário", expanded=True):
+            with st.form(key="novo_formulario"):
+                titulo = st.text_input("Título do Formulário")
+                descricao = st.text_area("Descrição")
+                
+                st.subheader("Perguntas")
+                perguntas = []
+                for i in range(3):
+                    with st.expander(f"Pergunta {i+1}", expanded=i<2):
+                        tipo = st.selectbox("Tipo", ["texto", "multipla_escolha", "escolha_unica", "escala"], key=f"tipo_{i}")
+                        texto = st.text_input("Texto da Pergunta", key=f"texto_{i}")
+                        obrigatoria = st.checkbox("Obrigatória", key=f"obrigatoria_{i}")
+                        opcoes = []
+                        
+                        if tipo in ["multipla_escolha", "escolha_unica"]:
+                            opcoes = st.text_area("Opções (uma por linha)", key=f"opcoes_{i}").split("\n")
+                        
+                        perguntas.append({
+                            "tipo": tipo,
+                            "texto": texto,
+                            "opcoes": opcoes,
+                            "obrigatoria": obrigatoria
+                        })
 
-            if st.form_submit_button("Publicar Formulário"):
-                form = criar_formulario(supabase, reuniao_selecionada["id"], titulo, descricao, perguntas)
-                if form:
-                    link = f"{os.getenv('APP_URL')}/?form_id={form['id']}&user_id={st.session_state['user_id']}"
-                    st.success(f"Formulário criado! [Link de Acesso]({link})")
+                if st.form_submit_button("Criar Formulário"):
+                    try:
+                        # Criar formulário
+                        novo_form = supabase.table("formularios").insert({
+                            "reuniao_id": reuniao_selecionada["id"],
+                            "titulo": titulo,
+                            "descricao": descricao
+                        }).execute().data[0]
+                        
+                        # Adicionar perguntas
+                        for i, pergunta in enumerate(perguntas):
+                            supabase.table("perguntas").insert({
+                                "formulario_id": novo_form["id"],
+                                "texto": pergunta["texto"],
+                                "tipo": pergunta["tipo"],
+                                "opcoes": json.dumps(pergunta["opcoes"]),
+                                "ordem": i+1,
+                                "obrigatoria": pergunta["obrigatoria"]
+                            }).execute()
+                        
+                        # Gerar link
+                        link_form = f"https://mynumber.streamlit.app/?formulario={novo_form['id']}&user_id={st.session_state['user_id']}"
+                        st.success(f"Formulário criado! [Link do Formulário]({link_form})")
+                    except Exception as e:
+                        st.error(f"Erro ao criar formulário: {str(e)}")
 
-    # Página: Visualizar Respostas
-    elif pagina == "Visualizar Respostas" and supabase:
-        st.header("📊 Respostas Coletadas")
+    # Página: Respostas
+    elif pagina == "Respostas" and supabase:
+        st.header("📊 Visualizar Respostas")
         
-        forms = supabase.table("forms_metadata").select("*").execute().data
-        form_selecionado = st.selectbox("Selecione um Formulário", forms, format_func=lambda f: f["title"])
+        formularios = supabase.table("formularios").select("*").execute().data
+        form_selecionado = st.selectbox("Selecione um Formulário", formularios, format_func=lambda f: f["titulo"])
         
         if form_selecionado:
-            respostas = supabase.table("responses").select("*").eq("form_id", form_selecionado["id"]).execute().data
-            perguntas = supabase.table("questions").select("*").eq("form_id", form_selecionado["id"]).order("ordem").execute().data
+            respostas = supabase.table("respostas").select("*").eq("formulario_id", form_selecionado["id"]).execute().data
+            perguntas = supabase.table("perguntas").select("*").eq("formulario_id", form_selecionado["id"]).order("ordem").execute().data
             
             if respostas:
+                # Exportar CSV
+                df = pd.DataFrame([{
+                    **{"Usuário": r["usuario_id"], "Data": r["submetido_em"]},
+                    **{p["texto"]: json.loads(r["respostas"]).get(p["id"], "") 
+                    for p in perguntas}
+                } for r in respostas])
+                
                 st.download_button(
-                    "📥 Exportar CSV",
-                    pd.DataFrame([{
-                        **{"Usuário": r["user_id"], "Data": r["submitted_at"]},
-                        **{p["question_text"]: json.loads(r["answers"]).get(p["id"], "") 
-                        for p in perguntas}
-                    } for r in respostas]).to_csv(),
-                    f"respostas_{form_selecionado['title']}.csv"
+                    "⬇️ Exportar CSV",
+                    df.to_csv(index=False),
+                    f"respostas_{form_selecionado['titulo']}.csv",
+                    "text/csv"
                 )
-
+                
+                # Visualizar respostas
                 for resposta in respostas:
-                    with st.expander(f"Resposta de {resposta['user_id']}"):
-                        dados = json.loads(resposta["answers"])
+                    with st.expander(f"Resposta de {resposta['usuario_id']}"):
+                        respostas_data = json.loads(resposta["respostas"])
                         for pergunta in perguntas:
-                            st.write(f"**{pergunta['question_text']}**")
-                            resposta = dados.get(pergunta["id"], "N/A")
+                            st.markdown(f"**{pergunta['texto']}**")
+                            resposta = respostas_data.get(pergunta["id"], "N/A")
                             if isinstance(resposta, list):
                                 st.write(", ".join(resposta))
                             else:

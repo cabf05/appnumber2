@@ -1,315 +1,578 @@
 import streamlit as st
 from supabase import create_client, Client
+import random
+import time
+import io
 import uuid
+from PIL import Image, ImageDraw, ImageFont
 import pandas as pd
 from datetime import datetime
-import json
-import time
+import os
 
 # --- Configuração Inicial ---
 st.set_page_config(
-    page_title="Sistema de Numeração e Formulários",
+    page_title="Number Assignment System",
     layout="centered",
     initial_sidebar_state="expanded"
 )
 
-# --- Estilos CSS ---
+# --- Estilização CSS ---
 st.markdown("""
 <style>
     .main-header {text-align: center; margin-bottom: 30px;}
+    .number-display {font-size: 72px; text-align: center; margin: 30px 0;}
     .success-msg {background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px;}
     .error-msg {background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px;}
-    .form-box {border: 1px solid #ccc; padding: 20px; border-radius: 10px; margin: 10px 0;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- Funções Principais ---
+# --- Funções ---
 
 def get_supabase_client() -> Client:
-    """Cria conexão com o Supabase usando Secrets"""
+    """Estabelece conexão com o Supabase usando variáveis de ambiente."""
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_KEY")
+    if not supabase_url or not supabase_key:
+        st.error("Credenciais do Supabase não configuradas no ambiente.")
+        return None
     try:
-        return create_client(
-            st.secrets["SUPABASE_URL"],
-            st.secrets["SUPABASE_KEY"]
-        )
+        client = create_client(supabase_url, supabase_key)
+        client.table("_dummy").select("*").limit(1).execute()
+        return client
     except Exception as e:
-        st.error(f"Erro de conexão com o Supabase: {str(e)}")
+        st.error(f"Erro ao conectar ao Supabase: {str(e)}")
         return None
 
-def inicializar_banco_dados(supabase):
-    """Cria todas as tabelas necessárias se não existirem"""
+def check_table_exists(supabase, table_name):
+    """Verifica se uma tabela específica existe no Supabase."""
     try:
-        # Tabela de reuniões
-        supabase.rpc("execute_sql", params={
-            "query": """
-                CREATE TABLE IF NOT EXISTS reunioes (
-                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                    nome TEXT NOT NULL,
-                    tabela_nome TEXT NOT NULL UNIQUE,
-                    max_numeros INT NOT NULL,
-                    criado_em TIMESTAMPTZ DEFAULT NOW()
-                );
-            """
-        }).execute()
-
-        # Tabelas de formulários
-        supabase.rpc("execute_sql", params={
-            "query": """
-                CREATE TABLE IF NOT EXISTS formularios (
-                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                    reuniao_id UUID REFERENCES reunioes(id),
-                    titulo TEXT NOT NULL,
-                    descricao TEXT,
-                    criado_em TIMESTAMPTZ DEFAULT NOW()
-                );
-            """
-        }).execute()
-
-        supabase.rpc("execute_sql", params={
-            "query": """
-                CREATE TABLE IF NOT EXISTS perguntas (
-                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                    formulario_id UUID REFERENCES formularios(id) ON DELETE CASCADE,
-                    texto TEXT NOT NULL,
-                    tipo TEXT NOT NULL,
-                    opcoes JSONB,
-                    ordem INT NOT NULL,
-                    obrigatoria BOOLEAN DEFAULT FALSE
-                );
-            """
-        }).execute()
-
-        supabase.rpc("execute_sql", params={
-            "query": """
-                CREATE TABLE IF NOT EXISTS respostas (
-                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                    formulario_id UUID REFERENCES formularios(id) ON DELETE CASCADE,
-                    usuario_id TEXT NOT NULL,
-                    respostas JSONB NOT NULL,
-                    submetido_em TIMESTAMPTZ DEFAULT NOW()
-                );
-            """
-        }).execute()
-
+        supabase.table(table_name).select("*").limit(1).execute()
         return True
-    except Exception as e:
-        st.error(f"Erro ao criar tabelas: {str(e)}")
+    except Exception:
         return False
 
-# --- Estado da Sessão ---
-if "user_id" not in st.session_state:
-    st.session_state["user_id"] = str(uuid.uuid4())
-
-# --- Inicialização do Supabase ---
-supabase = get_supabase_client()
-if supabase:
-    inicializar_banco_dados(supabase)
-
-# --- Manipulação de Parâmetros da URL ---
-query_params = st.query_params
-form_id = query_params.get("formulario", None)
-
-# --- Modo Participante (Formulário) ---
-if form_id and supabase:
+def create_meeting_table(supabase, table_name, meeting_name, max_number=999):
+    """Cria uma nova tabela para uma reunião no Supabase e registra metadados."""
     try:
-        formulario = supabase.table("formularios").select("*").eq("id", form_id).single().execute().data
-        perguntas = supabase.table("perguntas").select("*").eq("formulario_id", form_id).order("ordem").execute().data
+        response_metadata = supabase.table("meetings_metadata").insert({
+            "table_name": table_name,
+            "meeting_name": meeting_name,
+            "created_at": datetime.now().isoformat(),
+            "max_number": max_number
+        }).execute()
 
-        st.title(formulario["titulo"])
-        if formulario.get("descricao"):
-            st.markdown(f"*{formulario['descricao']}*")
+        create_table_query = f"""
+        CREATE TABLE public.{table_name} (
+            id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            number INTEGER NOT NULL,
+            assigned BOOLEAN DEFAULT FALSE,
+            assigned_at TIMESTAMPTZ,
+            user_id TEXT
+        );
+        """
+        supabase.rpc("execute_sql", {"query": create_table_query}).execute()
 
-        resposta_existente = supabase.table("respostas").select("*").eq("formulario_id", form_id).eq("usuario_id", st.session_state["user_id"]).execute().data
-        if resposta_existente:
-            st.warning("Você já respondeu este formulário!")
-            st.stop()
+        time.sleep(1)
+        if not check_table_exists(supabase, table_name):
+            raise Exception(f"Tabela {table_name} não foi criada com sucesso no Supabase.")
 
-        respostas = {}
-        with st.form(key="formulario_participante"):
-            for pergunta in perguntas:
-                resposta = None
-                label = f"{pergunta['texto']}{' *' if pergunta['obrigatoria'] else ''}"
-                
-                if pergunta["tipo"] == "texto":
-                    resposta = st.text_input(label)
-                elif pergunta["tipo"] == "multipla_escolha":
-                    opcoes = json.loads(pergunta["opcoes"])
-                    resposta = st.multiselect(label, opcoes)
-                elif pergunta["tipo"] == "escolha_unica":
-                    opcoes = json.loads(pergunta["opcoes"])
-                    resposta = st.radio(label, opcoes)
-                elif pergunta["tipo"] == "escala":
-                    resposta = st.slider(label, 1, 5)
-                
-                if pergunta["obrigatoria"] and not resposta:
-                    st.error("Campo obrigatório!")
+        batch_size = 100
+        for i in range(0, max_number, batch_size):
+            end = min(i + batch_size, max_number)
+            data = [{"number": j, "assigned": False, "assigned_at": None, "user_id": None} 
+                    for j in range(i+1, end+1)]
+            supabase.table(table_name).insert(data).execute()
+        
+        return True
+    except Exception as e:
+        st.error(f"Erro ao criar tabela de reunião: {str(e)}")
+        try:
+            supabase.table("meetings_metadata").delete().eq("table_name", table_name).execute()
+            supabase.rpc("execute_sql", {"query": f"DROP TABLE IF EXISTS public.{table_name}"}).execute()
+        except Exception as rollback_e:
+            st.error(f"Erro no rollback: {str(rollback_e)}")
+        return False
+
+def create_form_table(supabase, table_name, form_name, questions):
+    """Cria uma nova tabela para um formulário no Supabase e registra metadados."""
+    try:
+        response_metadata = supabase.table("forms_metadata").insert({
+            "table_name": table_name,
+            "form_name": form_name,
+            "created_at": datetime.now().isoformat(),
+            "questions": questions
+        }).execute()
+
+        create_table_query = f"""
+        CREATE TABLE public.{table_name} (
+            id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            participant_id TEXT,
+            {', '.join([f'"{q}" TEXT' for q in questions])}
+        );
+        """
+        supabase.rpc("execute_sql", {"query": create_table_query}).execute()
+
+        time.sleep(1)
+        if not check_table_exists(supabase, table_name):
+            raise Exception(f"Tabela {table_name} não foi criada com sucesso no Supabase.")
+        
+        return True
+    except Exception as e:
+        st.error(f"Erro ao criar tabela de formulário: {str(e)}")
+        try:
+            supabase.table("forms_metadata").delete().eq("table_name", table_name).execute()
+            supabase.rpc("execute_sql", {"query": f"DROP TABLE IF EXISTS public.{table_name}"}).execute()
+        except Exception as rollback_e:
+            st.error(f"Erro no rollback: {str(rollback_e)}")
+        return False
+
+def get_available_meetings(supabase):
+    """Recupera a lista de reuniões disponíveis da tabela de metadados."""
+    try:
+        response = supabase.table("meetings_metadata").select("*").execute()
+        return response.data if response.data else []
+    except Exception as e:
+        st.error(f"Erro ao recuperar reuniões: {str(e)}")
+        return []
+
+def get_available_forms(supabase):
+    """Recupera a lista de formulários disponíveis da tabela de metadados."""
+    try:
+        response = supabase.table("forms_metadata").select("*").execute()
+        return response.data if response.data else []
+    except Exception as e:
+        st.error(f"Erro ao recuperar formulários: {str(e)}")
+        return []
+
+def generate_number_image(number):
+    """Gera uma imagem com o número atribuído."""
+    width, height = 600, 300
+    img = Image.new("RGB", (width, height), color=(255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    
+    for y in range(height):
+        r = int(220 - y/3)
+        g = int(240 - y/3)
+        b = 255
+        for x in range(width):
+            draw.point((x, y), fill=(r, g, b))
+    
+    try:
+        font = ImageFont.truetype("Arial.ttf", 200)
+    except IOError:
+        font = ImageFont.load_default()
+    
+    number_text = str(number)
+    bbox = draw.textbbox((0, 0), number_text, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    text_position = ((width - text_width) // 2, (height - text_height) // 2)
+    draw.text(text_position, number_text, font=font, fill=(0, 0, 100))
+    
+    img_buffer = io.BytesIO()
+    img.save(img_buffer, format="PNG")
+    img_buffer.seek(0)
+    return img_buffer
+
+def generate_participant_link(table_name, user_id=None, mode="participant"):
+    """Gera um link para participantes acessarem a reunião ou formulário."""
+    base_url = "https://mynumber.streamlit.app"
+    if user_id:
+        return f"{base_url}/?table={table_name}&mode={mode}&user_id={user_id}"
+    return f"{base_url}/?table={table_name}&mode={mode}"
+
+# --- Verifica Modo (Master, Participant ou Participant_Form) ---
+query_params = st.query_params
+mode = query_params.get("mode", "master")
+table_name_from_url = query_params.get("table", None)
+
+if "user_id" not in st.session_state:
+    user_id_from_url = query_params.get("user_id", None)
+    if user_id_from_url:
+        st.session_state["user_id"] = user_id_from_url
+    else:
+        st.session_state["user_id"] = str(uuid.uuid4())
+
+if mode == "participant" and table_name_from_url:
+    # --- Modo Participante para Reuniões ---
+    st.markdown("<h1 class='main-header'>Obtenha Seu Número</h1>", unsafe_allow_html=True)
+    supabase = get_supabase_client()
+    if not supabase:
+        st.stop()
+    
+    if not check_table_exists(supabase, table_name_from_url):
+        st.error("Reunião não encontrada ou inválida.")
+        st.stop()
+    
+    try:
+        meeting_info = supabase.table("meetings_metadata").select("*").eq("table_name", table_name_from_url).execute()
+        meeting_name = meeting_info.data[0]["meeting_name"] if meeting_info.data else "Reunião"
+        st.subheader(f"Reunião: {meeting_name}")
+    except Exception:
+        st.subheader("Obtenha um número para a reunião")
+
+    user_id = st.session_state["user_id"]
+    
+    participant_link = generate_participant_link(table_name_from_url, user_id, mode="participant")
+    st.markdown(f"**Seu Link Persistente:** [{participant_link}]({participant_link})")
+    st.write("Guarde este link para acessar sempre o mesmo número!")
+
+    try:
+        existing = supabase.table(table_name_from_url).select("number").eq("user_id", user_id).execute()
+        if existing.data:
+            st.session_state["assigned_number"] = existing.data[0]["number"]
+        else:
+            with st.spinner("Atribuindo um número..."):
+                response = supabase.table(table_name_from_url).select("*").eq("assigned", False).execute()
+                if response.data:
+                    available_numbers = [row["number"] for row in response.data]
+                    if available_numbers:
+                        assigned_number = random.choice(available_numbers)
+                        supabase.table(table_name_from_url).update({
+                            "assigned": True,
+                            "assigned_at": datetime.now().isoformat(),
+                            "user_id": user_id
+                        }).eq("number", assigned_number).execute()
+                        st.session_state["assigned_number"] = assigned_number
+                    else:
+                        st.error("Todos os números foram atribuídos!")
+                        st.stop()
+                else:
+                    st.error("Todos os números foram atribuídos!")
                     st.stop()
-                
-                respostas[pergunta["id"]] = resposta
 
-            if st.form_submit_button("Enviar Respostas"):
-                supabase.table("respostas").insert({
-                    "formulario_id": form_id,
-                    "usuario_id": st.session_state["user_id"],
-                    "respostas": json.dumps(respostas)
-                }).execute()
-                st.success("Respostas enviadas com sucesso!")
-                time.sleep(2)
-                st.rerun()
+        st.markdown(f"""
+        <div class='success-msg'>
+            <p>Seu número atribuído é:</p>
+            <div class='number-display'>{st.session_state['assigned_number']}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     except Exception as e:
-        st.error(f"Erro ao carregar formulário: {str(e)}")
-    st.stop()
+        st.error(f"Erro ao atribuir número: {str(e)}")
+        st.stop()
+    
+    if st.button("Salvar como Imagem"):
+        with st.spinner("Gerando imagem..."):
+            img_buffer = generate_number_image(st.session_state["assigned_number"])
+            st.image(img_buffer)
+            st.download_button(
+                "Baixar Imagem",
+                img_buffer,
+                file_name=f"meu_numero_{st.session_state['assigned_number']}.png",
+                mime="image/png"
+            )
 
-# --- Modo Organizador ---
-else:
-    st.sidebar.title("Painel do Organizador")
-    pagina = st.sidebar.radio("Navegação", ["Reuniões", "Formulários", "Respostas"])
+elif mode == "participant_form" and table_name_from_url:
+    # --- Modo Participante para Formulários ---
+    st.markdown("<h1 class='main-header'>Envio de Formulário</h1>", unsafe_allow_html=True)
+    supabase = get_supabase_client()
+    if not supabase:
+        st.stop()
+    
+    if not check_table_exists(supabase, table_name_from_url):
+        st.error("Formulário não encontrado ou inválido.")
+        st.stop()
+    
+    try:
+        form_info = supabase.table("forms_metadata").select("*").eq("table_name", table_name_from_url).execute()
+        form_name = form_info.data[0]["form_name"] if form_info.data else "Formulário"
+        questions = form_info.data[0]["questions"] if form_info.data else []
+        st.subheader(f"Formulário: {form_name}")
+    except Exception:
+        st.subheader("Envie suas respostas")
 
-    # Página: Reuniões
-    if pagina == "Reuniões":
-        st.header("📅 Gerenciar Reuniões")
-        
-        with st.expander("➕ Nova Reunião", expanded=True):
-            with st.form(key="nova_reuniao"):
-                nome_reuniao = st.text_input("Nome da Reunião")
-                max_numeros = st.number_input("Número Máximo de Participantes", 10, 10000, 100)
-                
-                if st.form_submit_button("Criar"):
-                    try:
-                        tabela_nome = f"reuniao_{uuid.uuid4().hex[:8]}"
-                        
-                        supabase.rpc("execute_sql", params={
-                            "query": f"""
-                                CREATE TABLE {tabela_nome} (
-                                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                                    numero INT NOT NULL UNIQUE,
-                                    atribuido BOOLEAN DEFAULT FALSE,
-                                    usuario_id TEXT,
-                                    atribuido_em TIMESTAMPTZ
-                                );
-                            """
-                        }).execute()
-                        
-                        reuniao = supabase.table("reunioes").insert({
-                            "nome": nome_reuniao,
-                            "tabela_nome": tabela_nome,
-                            "max_numeros": max_numeros
-                        }).execute().data[0]
-                        
-                        numeros = [{"numero": n} for n in range(1, max_numeros+1)]
-                        for i in range(0, len(numeros), 1000):
-                            supabase.table(tabela_nome).insert(numeros[i:i+1000]).execute()
-                        
-                        st.success(f"Reunião '{nome_reuniao}' criada! Tabela: {tabela_nome}")
-                    except Exception as e:
-                        st.error(f"Erro ao criar reunião: {str(e)}")
+    if not questions:
+        st.error("Nenhuma pergunta encontrada para este formulário.")
+        st.stop()
 
-        st.subheader("Reuniões Ativas")
-        if supabase:
-            reunioes = supabase.table("reunioes").select("*").execute().data
-            for reuniao in reunioes:
-                col1, col2 = st.columns([4,1])
-                col1.markdown(f"""
-                    **{reuniao['nome']}**  
-                    *Números: 1-{reuniao['max_numeros']}*  
-                    `Tabela: {reuniao['tabela_nome']}`
-                """)
-                if col2.button("Excluir", key=f"del_{reuniao['id']}"):
-                    supabase.table("reunioes").delete().eq("id", reuniao["id"]).execute()
-                    st.rerun()
+    with st.form("form_submission"):
+        st.write("Por favor, responda às seguintes perguntas:")
+        answers = {}
+        for q in questions:
+            answers[q] = st.text_input(q)
+        submit_button = st.form_submit_button("Enviar")
 
-    # Página: Formulários
-    elif pagina == "Formulários" and supabase:
-        st.header("📝 Gerenciar Formulários")
-        
-        reunioes = supabase.table("reunioes").select("*").execute().data
-        reuniao_selecionada = st.selectbox("Selecione a Reunião", reunioes, format_func=lambda r: r["nome"])
-        
-        with st.expander("➕ Novo Formulário", expanded=True):
-            with st.form(key="novo_formulario"):
-                titulo = st.text_input("Título do Formulário")
-                descricao = st.text_area("Descrição")
-                
-                st.subheader("Perguntas")
-                perguntas = []
-                for i in range(3):
-                    with st.expander(f"Pergunta {i+1}", expanded=i<2):
-                        tipo = st.selectbox("Tipo", ["texto", "multipla_escolha", "escolha_unica", "escala"], key=f"tipo_{i}")
-                        texto = st.text_input("Texto da Pergunta", key=f"texto_{i}")
-                        obrigatoria = st.checkbox("Obrigatória", key=f"obrigatoria_{i}")
-                        opcoes = []
-                        
-                        if tipo in ["multipla_escolha", "escolha_unica"]:
-                            opcoes = st.text_area("Opções (uma por linha)", key=f"opcoes_{i}").split("\n")
-                        
-                        perguntas.append({
-                            "tipo": tipo,
-                            "texto": texto,
-                            "opcoes": opcoes,
-                            "obrigatoria": obrigatoria
-                        })
-
-                if st.form_submit_button("Criar Formulário"):
-                    try:
-                        novo_form = supabase.table("formularios").insert({
-                            "reuniao_id": reuniao_selecionada["id"],
-                            "titulo": titulo,
-                            "descricao": descricao
-                        }).execute().data[0]
-                        
-                        for i, pergunta in enumerate(perguntas):
-                            supabase.table("perguntas").insert({
-                                "formulario_id": novo_form["id"],
-                                "texto": pergunta["texto"],
-                                "tipo": pergunta["tipo"],
-                                "opcoes": json.dumps(pergunta["opcoes"]),
-                                "ordem": i+1,
-                                "obrigatoria": pergunta["obrigatoria"]
-                            }).execute()
-                        
-                        link_form = f"https://mynumber.streamlit.app/?formulario={novo_form['id']}&user_id={st.session_state['user_id']}"
-                        st.success(f"Formulário criado! [Link do Formulário]({link_form})")
-                    except Exception as e:
-                        st.error(f"Erro ao criar formulário: {str(e)}")
-
-    # Página: Respostas
-    elif pagina == "Respostas" and supabase:
-        st.header("📊 Visualizar Respostas")
-        
-        formularios = supabase.table("formularios").select("*").execute().data
-        form_selecionado = st.selectbox("Selecione um Formulário", formularios, format_func=lambda f: f["titulo"])
-        
-        if form_selecionado:
-            respostas = supabase.table("respostas").select("*").eq("formulario_id", form_selecionado["id"]).execute().data
-            perguntas = supabase.table("perguntas").select("*").eq("formulario_id", form_selecionado["id"]).order("ordem").execute().data
-            
-            if respostas:
-                df = pd.DataFrame([{
-                    **{"Usuário": r["usuario_id"], "Data": r["submetido_em"]},
-                    **{p["texto"]: json.loads(r["respostas"]).get(p["id"], "") 
-                    for p in perguntas}
-                } for r in respostas])
-                
-                st.download_button(
-                    "⬇️ Exportar CSV",
-                    df.to_csv(index=False),
-                    f"respostas_{form_selecionado['titulo']}.csv",
-                    "text/csv"
-                )
-                
-                for resposta in respostas:
-                    with st.expander(f"Resposta de {resposta['usuario_id']}"):
-                        respostas_data = json.loads(resposta["respostas"])
-                        for pergunta in perguntas:
-                            st.markdown(f"**{pergunta['texto']}**")
-                            resposta = respostas_data.get(pergunta["id"], "N/A")
-                            if isinstance(resposta, list):
-                                st.write(", ".join(resposta))
-                            else:
-                                st.write(resposta)
+        if submit_button:
+            if all(answers.values()):
+                try:
+                    participant_id = st.session_state["user_id"]
+                    data = {"participant_id": participant_id}
+                    data.update(answers)
+                    supabase.table(table_name_from_url).insert(data).execute()
+                    st.success("Suas respostas foram enviadas com sucesso!")
+                except Exception as e:
+                    st.error(f"Erro ao enviar respostas: {str(e)}")
             else:
-                st.info("Nenhuma resposta coletada ainda")
+                st.warning("Por favor, responda todas as perguntas.")
+
+else:
+    # --- Modo Master ---
+    valid_pages = ["Gerenciar Reuniões", "Compartilhar Link da Reunião", "Ver Estatísticas", "Gerenciar Formulários", "Compartilhar Link do Formulário"]
+    if "page" not in st.session_state or st.session_state["page"] not in valid_pages:
+        st.session_state["page"] = "Gerenciar Reuniões"
+
+    st.sidebar.title("Menu (Master)")
+    page = st.sidebar.radio("Escolha uma opção", valid_pages, index=valid_pages.index(st.session_state["page"]))
+
+    # --- Página 1: Gerenciar Reuniões ---
+    if page == "Gerenciar Reuniões":
+        st.session_state["page"] = "Gerenciar Reuniões"
+        st.markdown("<h1 class='main-header'>Gerenciar Reuniões</h1>", unsafe_allow_html=True)
+        supabase = get_supabase_client()
+        if not supabase:
+            st.stop()
+        
+        with st.form("create_meeting_form"):
+            st.subheader("Criar Nova Reunião")
+            meeting_name = st.text_input("Nome da Reunião")
+            max_number = st.number_input("Número Máximo", min_value=10, max_value=10000, value=999)
+            submit_button = st.form_submit_button("Criar Reunião")
+            
+            if submit_button:
+                if meeting_name:
+                    table_name = f"meeting_{int(time.time())}_{meeting_name.lower().replace(' ', '_')}"
+                    if check_table_exists(supabase, table_name):
+                        st.error("Uma reunião com esse nome já existe. Tente outro nome.")
+                    else:
+                        with st.spinner("Criando reunião..."):
+                            success = create_meeting_table(supabase, table_name, meeting_name, max_number)
+                            if success:
+                                participant_link = generate_participant_link(table_name, mode="participant")
+                                st.success(f"Reunião '{meeting_name}' criada com sucesso!")
+                                st.markdown(f"**Link para Participantes:** [{participant_link}]({participant_link})")
+                                st.session_state["selected_table"] = table_name
+                                st.session_state["page"] = "Compartilhar Link da Reunião"
+                                st.rerun()
+                            else:
+                                st.error("Falha ao criar a reunião.")
+                else:
+                    st.warning("Por favor, insira um nome para a reunião.")
+        
+        st.subheader("Reuniões Existentes")
+        meetings = get_available_meetings(supabase)
+        if meetings:
+            meeting_data = []
+            for meeting in meetings:
+                if "table_name" in meeting and "meeting_name" in meeting:
+                    table_name = meeting["table_name"]
+                    if check_table_exists(supabase, table_name):
+                        try:
+                            count_response = supabase.table(table_name).select("*", count="exact").eq("assigned", True).execute()
+                            assigned_count = count_response.count if hasattr(count_response, 'count') else 0
+                            participant_link = generate_participant_link(table_name, mode="participant")
+                            meeting_data.append({
+                                "Nome": meeting.get("meeting_name", "Sem nome"),
+                                "Tabela": table_name,
+                                "Link": participant_link,
+                                "Criada em": meeting.get("created_at", "")[:16].replace("T", " "),
+                                "Números Atribuídos": assigned_count,
+                                "Total de Números": meeting.get("max_number", 0)
+                            })
+                        except Exception as e:
+                            st.warning(f"Erro ao processar reunião {table_name}: {str(e)}")
+                    else:
+                        st.warning(f"Tabela {table_name} não existe no banco de dados.")
+            if meeting_data:
+                df = pd.DataFrame(meeting_data)
+                st.dataframe(df)
+            else:
+                st.info("Nenhuma reunião válida encontrada.")
+        else:
+            st.info("Nenhuma reunião disponível ou erro ao acessar o Supabase.")
+
+    # --- Página 2: Compartilhar Link da Reunião ---
+    elif page == "Compartilhar Link da Reunião":
+        st.session_state["page"] = "Compartilhar Link da Reunião"
+        st.markdown("<h1 class='main-header'>Compartilhar Link da Reunião</h1>", unsafe_allow_html=True)
+        
+        supabase = get_supabase_client()
+        if not supabase:
+            st.stop()
+        
+        meetings = get_available_meetings(supabase)
+        if not meetings:
+            st.info("Nenhuma reunião disponível. Crie uma reunião primeiro.")
+            st.stop()
+        
+        options = {f"{m['meeting_name']} ({m['table_name']})": m["table_name"] 
+                   for m in meetings if "table_name" in m and "meeting_name" in m}
+        selected = st.selectbox("Selecione uma reunião para compartilhar:", list(options.keys()))
+        
+        if selected:
+            selected_table = options[selected]
+            participant_link = generate_participant_link(selected_table, mode="participant")
+            st.markdown(f"**Link para Participantes:** [{participant_link}]({participant_link})")
+            if st.button("Copiar Link"):
+                st.write("Link copiado para a área de transferência!")
+                st.code(participant_link)
+
+    # --- Página 3: Ver Estatísticas ---
+    elif page == "Ver Estatísticas":
+        st.session_state["page"] = "Ver Estatísticas"
+        st.markdown("<h1 class='main-header'>Estatísticas da Reunião</h1>", unsafe_allow_html=True)
+        supabase = get_supabase_client()
+        if not supabase:
+            st.stop()
+        
+        meetings = get_available_meetings(supabase)
+        if not meetings:
+            st.info("Nenhuma reunião disponível para análise.")
+            st.stop()
+        
+        options = {f"{m['meeting_name']} ({m['table_name']})": m["table_name"] 
+                   for m in meetings if "table_name" in m and "meeting_name" in m}
+        selected = st.selectbox("Selecione uma reunião:", list(options.keys()))
+        
+        if selected:
+            selected_table = options[selected]
+            try:
+                total_response = supabase.table(selected_table).select("*", count="exact").execute()
+                total_numbers = total_response.count if hasattr(total_response, 'count') else 0
+                assigned_response = supabase.table(selected_table).select("*", count="exact").eq("assigned", True).execute()
+                assigned_numbers = assigned_response.count if hasattr(assigned_response, 'count') else 0
+                percentage = (assigned_numbers / total_numbers) * 100 if total_numbers > 0 else 0
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total de Números", total_numbers)
+                with col2:
+                    st.metric("Números Atribuídos", assigned_numbers)
+                with col3:
+                    st.metric("Porcentagem Atribuída", f"{percentage:.1f}%")
+                
+                try:
+                    time_data_response = supabase.table(selected_table).select("*").eq("assigned", True).order("assigned_at").execute()
+                    if time_data_response.data:
+                        time_data = []
+                        for item in time_data_response.data:
+                            if item.get("assigned_at"):
+                                time_data.append({
+                                    "time": item.get("assigned_at")[:16].replace("T", " "),
+                                    "count": 1
+                                })
+                        if time_data:
+                            df = pd.DataFrame(time_data)
+                            df["time"] = pd.to_datetime(df["time"])
+                            df["hour"] = df["time"].dt.floor("H")
+                            hourly_counts = df.groupby("hour").count().reset_index()
+                            hourly_counts["hour_str"] = hourly_counts["hour"].dt.strftime("%m/%d %H:00")
+                            st.subheader("Atribuições de Números por Hora")
+                            st.bar_chart(data=hourly_counts, x="hour_str", y="count")
+                except Exception:
+                    st.info("Dados temporais não disponíveis para esta reunião.")
+                
+                if st.button("Exportar Dados"):
+                    try:
+                        all_data_response = supabase.table(selected_table).select("*").execute()
+                        if all_data_response.data:
+                            df = pd.DataFrame(all_data_response.data)
+                            csv = df.to_csv(index=False)
+                            st.download_button(
+                                "Baixar CSV",
+                                csv,
+                                file_name=f"{selected_table}_export.csv",
+                                mime="text/csv"
+                            )
+                    except Exception as e:
+                        st.error(f"Erro ao exportar dados: {str(e)}")
+            except Exception as e:
+                st.error(f"Erro ao recuperar estatísticas: {str(e)}")
+
+    # --- Página 4: Gerenciar Formulários ---
+    elif page == "Gerenciar Formulários":
+        st.session_state["page"] = "Gerenciar Formulários"
+        st.markdown("<h1 class='main-header'>Gerenciar Formulários</h1>", unsafe_allow_html=True)
+        supabase = get_supabase_client()
+        if not supabase:
+            st.stop()
+        
+        with st.form("create_form_form"):
+            st.subheader("Criar Novo Formulário")
+            form_name = st.text_input("Nome do Formulário")
+            questions_input = st.text_area("Perguntas (uma por linha)")
+            submit_button = st.form_submit_button("Criar Formulário")
+            
+            if submit_button:
+                if form_name and questions_input:
+                    questions = [q.strip() for q in questions_input.split("\n") if q.strip()]
+                    if questions:
+                        table_name = f"form_{int(time.time())}_{form_name.lower().replace(' ', '_')}"
+                        if check_table_exists(supabase, table_name):
+                            st.error("Um formulário com esse nome já existe. Tente outro nome.")
+                        else:
+                            with st.spinner("Criando formulário..."):
+                                success = create_form_table(supabase, table_name, form_name, questions)
+                                if success:
+                                    participant_link = generate_participant_link(table_name, mode="participant_form")
+                                    st.success(f"Formulário '{form_name}' criado com sucesso!")
+                                    st.markdown(f"**Link para Participantes:** [{participant_link}]({participant_link})")
+                                    st.session_state["selected_form_table"] = table_name
+                                    st.session_state["page"] = "Compartilhar Link do Formulário"
+                                    st.rerun()
+                                else:
+                                    st.error("Falha ao criar o formulário.")
+                    else:
+                        st.warning("Por favor, insira pelo menos uma pergunta.")
+                else:
+                    st.warning("Por favor, insira um nome para o formulário e pelo menos uma pergunta.")
+        
+        st.subheader("Formulários Existentes")
+        forms = get_available_forms(supabase)
+        if forms:
+            form_data = []
+            for form in forms:
+                if "table_name" in form and "form_name" in form:
+                    table_name = form["table_name"]
+                    if check_table_exists(supabase, table_name):
+                        try:
+                            count_response = supabase.table(table_name).select("*", count="exact").execute()
+                            response_count = count_response.count if hasattr(count_response, 'count') else 0
+                            participant_link = generate_participant_link(table_name, mode="participant_form")
+                            form_data.append({
+                                "Nome": form.get("form_name", "Sem nome"),
+                                "Tabela": table_name,
+                                "Link": participant_link,
+                                "Criado em": form.get("created_at", "")[:16].replace("T", " "),
+                                "Respostas": response_count
+                            })
+                        except Exception as e:
+                            st.warning(f"Erro ao processar formulário {table_name}: {str(e)}")
+                    else:
+                        st.warning(f"Tabela {table_name} não existe no banco de dados.")
+            if form_data:
+                df = pd.DataFrame(form_data)
+                st.dataframe(df)
+            else:
+                st.info("Nenhum formulário válido encontrado.")
+        else:
+            st.info("Nenhum formulário disponível ou erro ao acessar o Supabase.")
+
+    # --- Página 5: Compartilhar Link do Formulário ---
+    elif page == "Compartilhar Link do Formulário":
+        st.session_state["page"] = "Compartilhar Link do Formulário"
+        st.markdown("<h1 class='main-header'>Compartilhar Link do Formulário</h1>", unsafe_allow_html=True)
+        
+        supabase = get_supabase_client()
+        if not supabase:
+            st.stop()
+        
+        forms = get_available_forms(supabase)
+        if not forms:
+            st.info("Nenhum formulário disponível. Crie um formulário primeiro.")
+            st.stop()
+        
+        options = {f"{f['form_name']} ({f['table_name']})": f["table_name"] 
+                   for f in forms if "table_name" in f and "form_name" in f}
+        selected = st.selectbox("Selecione um formulário para compartilhar:", list(options.keys()))
+        
+        if selected:
+            selected_table = options[selected]
+            participant_link = generate_participant_link(selected_table, mode="participant_form")
+            st.markdown(f"**Link para Participantes:** [{participant_link}]({participant_link})")
+            if st.button("Copiar Link"):
+                st.write("Link copiado para a área de transferência!")
+                st.code(participant_link)
 
 if __name__ == "__main__":
     pass

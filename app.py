@@ -112,6 +112,15 @@ def get_available_forms(supabase):
         st.error(f"Erro ao recuperar formulários: {str(e)}")
         return []
 
+def get_answered_forms(supabase, participant_id):
+    """Recupera os IDs dos formulários já respondidos por um participant_id."""
+    try:
+        response = supabase.table("responses").select("form_id").eq("participant_id", participant_id).execute()
+        return set(row["form_id"] for row in response.data) if response.data else set()
+    except Exception as e:
+        st.error(f"Erro ao verificar formulários respondidos: {str(e)}")
+        return set()
+
 def generate_number_image(number):
     """Gera uma imagem com o número atribuído."""
     width, height = 600, 300
@@ -216,13 +225,17 @@ if mode == "participant" and table_name_from_url:
         </div>
         """, unsafe_allow_html=True)
 
-        # Mostrar links de formulários disponíveis vinculados ao número atribuído
+        # Mostrar links de formulários disponíveis com status
         st.subheader("Formulários Disponíveis para Você")
         forms = get_available_forms(supabase)
+        participant_id = str(st.session_state["assigned_number"])
+        answered_forms = get_answered_forms(supabase, participant_id)
         if forms:
             for form in forms:
+                form_id = form["id"]
                 form_link = generate_participant_link(form["table_name"], user_id, mode="participant_form")
-                st.markdown(f"- **{form['form_name']}**: [{form_link}]({form_link})")
+                status = "✅ Respondido" if form_id in answered_forms else "⏳ Pendente"
+                st.markdown(f"- **{form['form_name']}** ({status}): [{form_link}]({form_link})")
         else:
             st.info("Nenhum formulário disponível no momento.")
 
@@ -261,6 +274,27 @@ elif mode == "participant_form" and table_name_from_url:
         st.error("Nenhuma pergunta encontrada para este formulário.")
         st.stop()
 
+    user_id = st.session_state["user_id"]
+    participant_id_default = ""
+    meeting_table_name = ""
+    for meeting in get_available_meetings(supabase):
+        assigned = supabase.table(meeting["table_name"]).select("number").eq("user_id", user_id).execute()
+        if assigned.data:
+            participant_id_default = str(assigned.data[0]["number"])
+            meeting_table_name = meeting["table_name"]
+            break
+    
+    if not participant_id_default:
+        st.error("Você precisa ter um número atribuído para responder formulários.")
+        st.stop()
+
+    # Verificar se o formulário já foi respondido
+    participant_id = participant_id_default
+    answered_forms = get_answered_forms(supabase, participant_id)
+    if form_id in answered_forms:
+        st.warning("Você já respondeu este formulário. Cada participante só pode responder uma vez.")
+        st.stop()
+
     with st.form("form_submission"):
         responses = {}
         for q in questions.data:
@@ -274,18 +308,9 @@ elif mode == "participant_form" and table_name_from_url:
                 selected_option = st.selectbox("Escolha uma opção", option_texts, key=f"resp_{q['id']}")
                 responses[q['id']] = option_ids[option_texts.index(selected_option)]
 
-        # Preencher participant_id automaticamente com o número atribuído
-        user_id = st.session_state["user_id"]
-        participant_id_default = ""
-        for meeting in get_available_meetings(supabase):
-            assigned = supabase.table(meeting["table_name"]).select("number").eq("user_id", user_id).execute()
-            if assigned.data:
-                participant_id_default = str(assigned.data[0]["number"])
-                break
-        
-        participant_id = st.text_input("Seu Nome ou ID", value=participant_id_default, key="participant_id", disabled=bool(participant_id_default))
+        st.text_input("Seu Nome ou ID", value=participant_id, key="participant_id", disabled=True)
         if st.form_submit_button("Enviar"):
-            if participant_id and all(responses.values()):
+            if all(responses.values()):
                 for q_id, answer in responses.items():
                     response_data = {
                         "form_id": form_id,
@@ -295,8 +320,16 @@ elif mode == "participant_form" and table_name_from_url:
                     }
                     supabase.table("responses").insert(response_data).execute()
                 st.success("Respostas enviadas com sucesso!")
+                st.markdown(f"Voltando para sua página de participante em 3 segundos...")
+                time.sleep(3)
+                st.query_params.update({
+                    "table": meeting_table_name,
+                    "mode": "participant",
+                    "user_id": user_id
+                })
+                st.rerun()
             else:
-                st.warning("Preencha todas as respostas e seu nome/ID.")
+                st.warning("Preencha todas as respostas.")
 
 else:
     # --- Modo Master ---
@@ -568,7 +601,6 @@ else:
                 else:
                     st.warning("Insira um nome para o formulário e pelo menos uma pergunta.")
 
-        # Mostrar todos os formulários disponíveis com links gerais
         st.subheader("Formulários Disponíveis")
         forms = get_available_forms(supabase)
         if forms:
@@ -611,7 +643,6 @@ else:
                 st.write("Link copiado para a área de transferência!")
                 st.code(participant_link)
 
-            # Mostrar links únicos para usuários com números atribuídos
             st.subheader("Links Únicos por Usuário")
             meetings = get_available_meetings(supabase)
             user_links = []

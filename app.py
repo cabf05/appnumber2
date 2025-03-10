@@ -103,6 +103,15 @@ def get_available_meetings(supabase):
         st.error(f"Erro ao recuperar reuniões: {str(e)}")
         return []
 
+def get_available_forms(supabase):
+    """Recupera a lista de formulários disponíveis da tabela de metadados."""
+    try:
+        response = supabase.table("forms_metadata").select("*").execute()
+        return response.data if response.data else []
+    except Exception as e:
+        st.error(f"Erro ao recuperar formulários: {str(e)}")
+        return []
+
 def generate_number_image(number):
     """Gera uma imagem com o número atribuído."""
     width, height = 600, 300
@@ -173,7 +182,7 @@ if mode == "participant" and table_name_from_url:
     user_id = st.session_state["user_id"]
     
     participant_link = generate_participant_link(table_name_from_url, user_id, mode="participant")
-    st.markdown(f"**Seu Link Persistente:** [{participant_link}]({participant_link})")
+    st.markdown(f"**Seu Link Persistente para Reunião:** [{participant_link}]({participant_link})")
     st.write("Guarde este link para acessar sempre o mesmo número!")
 
     try:
@@ -208,12 +217,14 @@ if mode == "participant" and table_name_from_url:
         """, unsafe_allow_html=True)
 
         # Mostrar links de formulários disponíveis vinculados ao número atribuído
-        st.subheader("Formulários Disponíveis")
-        forms = supabase.table("forms_metadata").select("*").execute()
-        if forms.data:
-            for form in forms.data:
+        st.subheader("Formulários Disponíveis para Você")
+        forms = get_available_forms(supabase)
+        if forms:
+            for form in forms:
                 form_link = generate_participant_link(form["table_name"], user_id, mode="participant_form")
-                st.markdown(f"- [{form['form_name']}]({form_link})")
+                st.markdown(f"- **{form['form_name']}**: [{form_link}]({form_link})")
+        else:
+            st.info("Nenhum formulário disponível no momento.")
 
     except Exception as e:
         st.error(f"Erro ao atribuir número: {str(e)}")
@@ -263,7 +274,7 @@ elif mode == "participant_form" and table_name_from_url:
                 selected_option = st.selectbox("Escolha uma opção", option_texts, key=f"resp_{q['id']}")
                 responses[q['id']] = option_ids[option_texts.index(selected_option)]
 
-        # Preencher participant_id automaticamente se user_id estiver no link
+        # Preencher participant_id automaticamente com o número atribuído
         user_id = st.session_state["user_id"]
         participant_id_default = ""
         for meeting in get_available_meetings(supabase):
@@ -272,7 +283,7 @@ elif mode == "participant_form" and table_name_from_url:
                 participant_id_default = str(assigned.data[0]["number"])
                 break
         
-        participant_id = st.text_input("Seu Nome ou ID", value=participant_id_default, key="participant_id")
+        participant_id = st.text_input("Seu Nome ou ID", value=participant_id_default, key="participant_id", disabled=bool(participant_id_default))
         if st.form_submit_button("Enviar"):
             if participant_id and all(responses.values()):
                 for q_id, answer in responses.items():
@@ -545,7 +556,7 @@ else:
                                 opt_data = {"question_id": question_id, "option_text": opt}
                                 opt_response = supabase.table("options").insert(opt_data).execute()
                                 if opt == q['correct']:
-                                    supabase.table("questions").update({"correct_answer": opt_response.data[0]['id']}).eq("id", question_id).execute()
+                                    supabase.table("questions").update({"correct_answer": str(opt_response.data[0]['id'])}).eq("id", question_id).execute()
 
                     participant_link = generate_participant_link(table_name, mode="participant_form")
                     st.success(f"Formulário '{form_name}' criado com sucesso!")
@@ -557,12 +568,12 @@ else:
                 else:
                     st.warning("Insira um nome para o formulário e pelo menos uma pergunta.")
 
-        # Mostrar todos os formulários disponíveis
-        st.subheader("Formulários Existentes")
-        forms = supabase.table("forms_metadata").select("*").execute()
-        if forms.data:
+        # Mostrar todos os formulários disponíveis com links gerais
+        st.subheader("Formulários Disponíveis")
+        forms = get_available_forms(supabase)
+        if forms:
             form_data = []
-            for form in forms.data:
+            for form in forms:
                 participant_link = generate_participant_link(form["table_name"], mode="participant_form")
                 form_data.append({
                     "Nome": form["form_name"],
@@ -570,7 +581,7 @@ else:
                     "Criado em": form["created_at"][:16].replace("T", " ")
                 })
             df = pd.DataFrame(form_data)
-            st.dataframe(df)
+            st.dataframe(df, column_config={"Link Geral": st.column_config.LinkColumn("Link Geral")})
         else:
             st.info("Nenhum formulário disponível.")
 
@@ -583,13 +594,13 @@ else:
         if not supabase:
             st.stop()
         
-        forms = supabase.table("forms_metadata").select("*").execute()
-        if not forms.data:
+        forms = get_available_forms(supabase)
+        if not forms:
             st.info("Nenhum formulário disponível. Crie um formulário primeiro.")
             st.stop()
         
         options = {f"{f['form_name']} ({f['table_name']})": f["table_name"] 
-                   for f in forms.data if "table_name" in f and "form_name" in f}
+                   for f in forms if "table_name" in f and "form_name" in f}
         selected = st.selectbox("Selecione um formulário para compartilhar:", list(options.keys()))
         
         if selected:
@@ -611,7 +622,7 @@ else:
                     user_links.append({"Número": user["number"], "Link": user_link})
             if user_links:
                 df = pd.DataFrame(user_links)
-                st.dataframe(df)
+                st.dataframe(df, column_config={"Link": st.column_config.LinkColumn("Link")})
             else:
                 st.info("Nenhum usuário com número atribuído encontrado.")
 

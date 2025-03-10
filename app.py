@@ -207,6 +207,14 @@ if mode == "participant" and table_name_from_url:
         </div>
         """, unsafe_allow_html=True)
 
+        # Mostrar links de formulários disponíveis vinculados ao número atribuído
+        st.subheader("Formulários Disponíveis")
+        forms = supabase.table("forms_metadata").select("*").execute()
+        if forms.data:
+            for form in forms.data:
+                form_link = generate_participant_link(form["table_name"], user_id, mode="participant_form")
+                st.markdown(f"- [{form['form_name']}]({form_link})")
+
     except Exception as e:
         st.error(f"Erro ao atribuir número: {str(e)}")
         st.stop()
@@ -255,7 +263,16 @@ elif mode == "participant_form" and table_name_from_url:
                 selected_option = st.selectbox("Escolha uma opção", option_texts, key=f"resp_{q['id']}")
                 responses[q['id']] = option_ids[option_texts.index(selected_option)]
 
-        participant_id = st.text_input("Seu Nome ou ID", key="participant_id")
+        # Preencher participant_id automaticamente se user_id estiver no link
+        user_id = st.session_state["user_id"]
+        participant_id_default = ""
+        for meeting in get_available_meetings(supabase):
+            assigned = supabase.table(meeting["table_name"]).select("number").eq("user_id", user_id).execute()
+            if assigned.data:
+                participant_id_default = str(assigned.data[0]["number"])
+                break
+        
+        participant_id = st.text_input("Seu Nome ou ID", value=participant_id_default, key="participant_id")
         if st.form_submit_button("Enviar"):
             if participant_id and all(responses.values()):
                 for q_id, answer in responses.items():
@@ -532,13 +549,30 @@ else:
 
                     participant_link = generate_participant_link(table_name, mode="participant_form")
                     st.success(f"Formulário '{form_name}' criado com sucesso!")
-                    st.markdown(f"**Link para Participantes:** [{participant_link}]({participant_link})")
+                    st.markdown(f"**Link Geral para Participantes:** [{participant_link}]({participant_link})")
                     st.session_state['questions'] = []
                     st.session_state["selected_form_table"] = table_name
                     st.session_state["page"] = "Compartilhar Link do Formulário"
                     st.rerun()
                 else:
                     st.warning("Insira um nome para o formulário e pelo menos uma pergunta.")
+
+        # Mostrar todos os formulários disponíveis
+        st.subheader("Formulários Existentes")
+        forms = supabase.table("forms_metadata").select("*").execute()
+        if forms.data:
+            form_data = []
+            for form in forms.data:
+                participant_link = generate_participant_link(form["table_name"], mode="participant_form")
+                form_data.append({
+                    "Nome": form["form_name"],
+                    "Link Geral": participant_link,
+                    "Criado em": form["created_at"][:16].replace("T", " ")
+                })
+            df = pd.DataFrame(form_data)
+            st.dataframe(df)
+        else:
+            st.info("Nenhum formulário disponível.")
 
     # --- Página 5: Compartilhar Link do Formulário ---
     elif page == "Compartilhar Link do Formulário":
@@ -561,10 +595,25 @@ else:
         if selected:
             selected_table = options[selected]
             participant_link = generate_participant_link(selected_table, mode="participant_form")
-            st.markdown(f"**Link para Participantes:** [{participant_link}]({participant_link})")
-            if st.button("Copiar Link"):
+            st.markdown(f"**Link Geral para Participantes:** [{participant_link}]({participant_link})")
+            if st.button("Copiar Link Geral"):
                 st.write("Link copiado para a área de transferência!")
                 st.code(participant_link)
+
+            # Mostrar links únicos para usuários com números atribuídos
+            st.subheader("Links Únicos por Usuário")
+            meetings = get_available_meetings(supabase)
+            user_links = []
+            for meeting in meetings:
+                assigned_users = supabase.table(meeting["table_name"]).select("user_id, number").eq("assigned", True).execute()
+                for user in assigned_users.data:
+                    user_link = generate_participant_link(selected_table, user["user_id"], mode="participant_form")
+                    user_links.append({"Número": user["number"], "Link": user_link})
+            if user_links:
+                df = pd.DataFrame(user_links)
+                st.dataframe(df)
+            else:
+                st.info("Nenhum usuário com número atribuído encontrado.")
 
 if __name__ == "__main__":
     pass
